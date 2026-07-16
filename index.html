@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <!-- 정적 게임용 최소 보안 정책: 외부 스크립트/오브젝트/폼/네트워크 요청 차단. (meta CSP는 frame-ancestors를 지원하지 않으므로 티스토리 iframe 임베드에는 영향 없음) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>스카이 캐논</title>
+  <style>
+    :root{color-scheme:dark;--panel:rgba(8,21,48,.9);--line:#63d8ff;--gold:#ffd869}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    html,body{margin:0;min-height:100%;background:#071127;color:#fff;font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif;overscroll-behavior:none}
+    body{display:flex;justify-content:center;align-items:center;padding:clamp(8px,2vw,22px);background:radial-gradient(circle at 50% 20%,#183d70,#071127 70%)}
+    .app{width:min(1100px,100%);display:grid;gap:12px}
+    .title{text-align:center;font-weight:900;letter-spacing:.12em;color:#dff8ff;text-shadow:0 0 18px #2cbcff;font-size:clamp(20px,3vw,34px)}
+    .stage{position:relative;border:2px solid #4386bd;border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0008,0 0 28px #2bc4ff33;aspect-ratio:16/9;background:#9edfff}
+    canvas{display:block;width:100%;height:100%;touch-action:none}
+    .loading{position:absolute;inset:0;display:grid;place-items:center;background:#08152a;color:#aeeeff;font-size:18px;z-index:3}
+    .loading.hidden{display:none}
+    .controls{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+    button{min-height:52px;border:1px solid #55c8f5;border-radius:12px;background:linear-gradient(#183e70,#0c2448);color:#fff;font:700 15px inherit;box-shadow:inset 0 1px #ffffff33,0 5px 12px #0005;cursor:pointer;touch-action:manipulation}
+    button:active{transform:translateY(2px);filter:brightness(1.25)}
+    button.fire{border-color:#ffcf54;background:linear-gradient(#d96628,#8e281d);color:#fff6c4;font-size:17px}
+    button:disabled{opacity:.42;cursor:not-allowed}
+    .hint{text-align:center;color:#adc5df;font-size:13px}
+    .restart{position:absolute;z-index:4;left:50%;top:65%;transform:translate(-50%,-50%);display:none;width:180px}
+    .restart.show{display:block}
+    @media(max-width:650px){body{padding:6px;align-items:flex-start}.app{gap:8px}.title{font-size:20px}.controls{grid-template-columns:repeat(3,1fr);gap:6px}.controls .fire{grid-column:2}.hint{font-size:11px}button{min-height:48px;font-size:13px}.stage{border-radius:11px}}
+  </style>
+</head>
+<body>
+  <main class="app">
+    <div class="title">SKY CANNON</div>
+    <section class="stage" aria-label="턴제 포격 게임">
+      <canvas id="game" width="960" height="540"></canvas>
+      <div id="loading" class="loading">전투 준비 중…</div>
+      <button id="restart" class="restart fire">다시 시작</button>
+    </section>
+    <nav class="controls" aria-label="게임 조작">
+      <button data-action="angleUp">각도 ＋</button><button data-action="angleDown">각도 －</button>
+      <button data-action="powerUp">파워 ＋</button><button data-action="powerDown">파워 －</button>
+      <button data-action="fire" class="fire">발사</button>
+    </nav>
+    <div class="hint">키보드: ↑↓ 각도 · ←→ 파워 · SPACE 발사</div>
+  </main>
+<script>
+"use strict";
+const W=960,H=540,GROUND=455,GRAVITY=145,WIND_FORCE=4.2;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rand=(a,b)=>a+Math.random()*(b-a);
+const ASSET_PATHS={player:"assets/player_basic.png",enemy:"assets/enemy_basic.png",playerShell:"assets/player_shell.png",enemyShell:"assets/enemy_shell.png",explosion:"assets/explosion.png",gauge:"assets/power_gauge_frame.png",wind:"assets/wind_icon.png",reticle:"assets/aim_reticle.png"};
+
+// 구형 브라우저(roundRect 미지원) 대비 폴리필.
+if(!CanvasRenderingContext2D.prototype.roundRect){
+  CanvasRenderingContext2D.prototype.roundRect=function(x,y,w,h,r){
+    const rr=Array.isArray(r)?(r[0]||0):(r||0),k=Math.min(rr,Math.abs(w)/2,Math.abs(h)/2);
+    this.beginPath();this.moveTo(x+k,y);this.arcTo(x+w,y,x+w,y+h,k);this.arcTo(x+w,y+h,x,y+h,k);this.arcTo(x,y+h,x,y,k);this.arcTo(x,y,x+w,y,k);this.closePath();return this;
+  };
+}
+
+// 이미지 주변의 흰색/회색 배경을 투명 처리해 제공된 PNG를 자연스럽게 합성한다.
+function removeConnectedBackground(img){
+  const c=document.createElement("canvas"),x=c.getContext("2d",{willReadFrequently:true});c.width=img.naturalWidth;c.height=img.naturalHeight;x.drawImage(img,0,0);
+  const im=x.getImageData(0,0,c.width,c.height),d=im.data,seen=new Uint8Array(c.width*c.height),q=[],push=(px,py)=>{if(px<0||py<0||px>=c.width||py>=c.height)return;const n=py*c.width+px;if(seen[n])return;seen[n]=1;q.push(n)};
+  for(let i=0;i<c.width;i++){push(i,0);push(i,c.height-1)}for(let i=0;i<c.height;i++){push(0,i);push(c.width-1,i)}
+  let head=0;while(head<q.length){const n=q[head++],i=n*4,r=d[i],g=d[i+1],b=d[i+2],hi=Math.max(r,g,b),lo=Math.min(r,g,b);if(hi-lo>27||hi<105)continue;d[i+3]=0;const px=n%c.width,py=(n/c.width)|0;push(px-1,py);push(px+1,py);push(px,py-1);push(px,py+1)}
+  x.putImageData(im,0,0);return c;
+}
+
+// assets 파일이 없거나 로딩에 실패했을 때 사용할 대체 그래픽을 즉석에서 그린다(게임이 멈추지 않도록).
+function makeFallback(key){
+  const dims={player:[120,100],enemy:[130,110],playerShell:[32,32],enemyShell:[32,32],explosion:[128,128],gauge:[120,30],wind:[27,27],reticle:[34,34]}[key]||[64,64];
+  const [w,h]=dims,c=document.createElement("canvas"),g=c.getContext("2d");c.width=w;c.height=h;
+  if(key==="player"||key==="enemy"){
+    const body=key==="player"?"#2f6db0":"#b0402f";
+    g.fillStyle="#20304a";g.beginPath();g.roundRect(w*.08,h*.62,w*.84,h*.3,10);g.fill();
+    g.fillStyle="#0e1a2e";for(let i=0;i<5;i++){g.beginPath();g.arc(w*.16+i*w*.17,h*.77,h*.09,0,7);g.fill();}
+    g.fillStyle=body;g.beginPath();g.roundRect(w*.14,h*.34,w*.62,h*.32,10);g.fill();
+    g.beginPath();g.roundRect(w*.3,h*.16,w*.34,h*.24,9);g.fill();
+    g.fillStyle="#0e1a2e";g.fillRect(w*.6,h*.24,w*.36,h*.08);
+    g.fillStyle="#ffffff33";g.beginPath();g.roundRect(w*.16,h*.36,w*.5,h*.08,6);g.fill();
+  }else if(key==="playerShell"||key==="enemyShell"){
+    g.fillStyle=key==="playerShell"?"#39d6ff":"#ff5a4c";g.beginPath();g.arc(w/2,h/2,w*.28,0,7);g.fill();
+    g.fillStyle="#ffffffaa";g.beginPath();g.arc(w*.42,h*.42,w*.1,0,7);g.fill();
+  }else if(key==="explosion"){
+    const grd=g.createRadialGradient(w/2,h/2,4,w/2,h/2,w/2);grd.addColorStop(0,"#fff7c8");grd.addColorStop(.35,"#ffd23f");grd.addColorStop(.7,"#ff7a1a");grd.addColorStop(1,"#ff7a1a00");
+    g.fillStyle=grd;g.beginPath();g.arc(w/2,h/2,w/2,0,7);g.fill();
+  }else if(key==="gauge"){
+    g.strokeStyle="#bdefff";g.lineWidth=2;g.beginPath();g.roundRect(1,1,w-2,h-2,8);g.stroke();
+  }else if(key==="wind"){
+    g.strokeStyle="#bcefff";g.lineWidth=3;g.lineCap="round";g.beginPath();g.moveTo(4,h/2);g.lineTo(w-5,h/2);g.moveTo(w-11,h/2-6);g.lineTo(w-5,h/2);g.lineTo(w-11,h/2+6);g.stroke();
+  }else if(key==="reticle"){
+    g.strokeStyle="#e8fcff";g.lineWidth=2;g.beginPath();g.arc(w/2,h/2,w*.32,0,7);g.stroke();g.beginPath();g.moveTo(w/2,2);g.lineTo(w/2,h-2);g.moveTo(2,h/2);g.lineTo(w-2,h/2);g.stroke();
+  }
+  return c;
+}
+
+class Tank{
+  constructor(game,side,x,y,w,h,image){Object.assign(this,{game,side,x,y,w,h,image,hp:100,angle:45,power:60})}
+  get center(){return{x:this.x+this.w/2,y:this.y+this.h*.55}}
+  get muzzle(){const a=this.angle*Math.PI/180,dir=this.side==="player"?1:-1;return{x:this.center.x+Math.cos(a)*dir*this.w*.45,y:this.center.y-Math.sin(a)*this.h*.43}}
+  draw(ctx){ctx.save();if(this.side==="enemy"){ctx.translate(this.x+this.w,this.y);ctx.scale(-1,1);ctx.drawImage(this.image,0,0,this.w,this.h)}else ctx.drawImage(this.image,this.x,this.y,this.w,this.h);ctx.restore()}
+}
+
+class Projectile{
+  constructor(game,owner,angle,power){this.game=game;this.owner=owner;const m=owner.muzzle,a=angle*Math.PI/180,dir=owner.side==="player"?1:-1,speed=power*3.05;Object.assign(this,{x:m.x,y:m.y,vx:Math.cos(a)*speed*dir,vy:-Math.sin(a)*speed,rotation:0,alive:true,image:owner.side==="player"?game.assets.playerShell:game.assets.enemyShell})}
+  // 빠른 포탄이 표적을 통과(터널링)하지 않도록 한 프레임을 여러 번 잘게 나눠 적분·충돌 검사한다.
+  update(dt){
+    const speed=Math.hypot(this.vx,this.vy),steps=Math.max(1,Math.min(40,Math.ceil(speed*dt/6))),h=dt/steps;
+    const target=this.owner.side==="player"?this.game.enemy:this.game.player;
+    for(let i=0;i<steps&&this.alive;i++){
+      this.vx+=this.game.wind*WIND_FORCE*h;this.vy+=GRAVITY*h;this.x+=this.vx*h;this.y+=this.vy*h;
+      const cx=clamp(this.x,target.x,target.x+target.w),cy=clamp(this.y,target.y,target.y+target.h);
+      if(Math.hypot(this.x-cx,this.y-cy)<14)return this.impact();
+      if(this.y>=GROUND||this.x<-60||this.x>W+60||this.y>H+40)return this.impact();
+    }
+    this.rotation=Math.atan2(this.vy,this.vx);
+  }
+  impact(){if(!this.alive)return;this.alive=false;this.game.startExplosion(clamp(this.x,0,W),clamp(this.y,0,GROUND))}
+  draw(ctx){ctx.save();ctx.translate(this.x,this.y);ctx.rotate(this.rotation);ctx.drawImage(this.image,-16,-16,32,32);ctx.restore()}
+}
+
+class Explosion{
+  constructor(x,y){Object.assign(this,{x,y,time:0,duration:.72})}
+  update(dt){this.time+=dt}
+  get done(){return this.time>=this.duration}
+  draw(ctx,img){const p=this.time/this.duration,s=Math.sin(Math.min(1,p)*Math.PI),size=45+65*s;ctx.save();ctx.globalAlpha=clamp(1-p*.65,0,1);ctx.drawImage(img,this.x-size/2,this.y-size/2,size,size);ctx.restore()}
+}
+
+class ComputerAI{
+  constructor(game){this.game=game}
+  // 여러 각도와 파워를 시뮬레이션해 목표에 가까운 탄도를 고른 뒤 오차를 추가한다.
+  chooseShot(){const g=this.game,t=g.enemy,target=g.player.center;let best={score:Infinity,angle:45,power:60};for(let a=20;a<=75;a+=2)for(let p=30;p<=100;p+=2){const hit=this.simulate(t,a,p);const score=Math.hypot(hit.x-target.x,hit.y-target.y);if(score<best.score)best={score,angle:a,power:p}}const accurate=Math.random()<.7,error=accurate?rand(-2.5,2.5):rand(-10,10);return{angle:clamp(best.angle+error,10,80),power:clamp(best.power+rand(-3,3)+(accurate?0:rand(-12,12)),20,100)}}
+  simulate(t,a,p){const r=a*Math.PI/180,m=t.muzzle;let x=m.x,y=m.y,vx=-Math.cos(r)*p*3.05,vy=-Math.sin(r)*p*3.05,dt=1/60;for(let i=0;i<600&&y<GROUND;i++){vx+=this.game.wind*WIND_FORCE*dt;vy+=GRAVITY*dt;x+=vx*dt;y+=vy*dt}return{x,y}}
+}
+
+class Game{
+  constructor(canvas,assets){this.canvas=canvas;this.ctx=canvas.getContext("2d");this.assets=assets;this.ai=new ComputerAI(this);this.last=performance.now();this.bind();this.reset();requestAnimationFrame(t=>this.loop(t))}
+  reset(){this.wind=this.newWind();this.player=new Tank(this,"player",75,GROUND-100,120,100,this.assets.player);this.enemy=new Tank(this,"enemy",755,GROUND-110,130,110,this.assets.enemy);this.projectile=null;this.explosion=null;this.shake=0;this.message="";this.aiTimer=0;this.explosionOwner="player";this.state="playerTurn";document.querySelector("#restart").classList.remove("show");this.updateControls()}
+  newWind(){return Math.round(rand(-10,10))}
+  bind(){
+    addEventListener("keydown",e=>{const map={ArrowUp:"angleUp",ArrowDown:"angleDown",ArrowRight:"powerUp",ArrowLeft:"powerDown",Space:"fire"};if(map[e.code]){e.preventDefault();this.action(map[e.code])}});
+    const holdable={angleUp:1,angleDown:1,powerUp:1,powerDown:1};
+    document.querySelectorAll("[data-action]").forEach(b=>{
+      let holdTimer=null,repeat=null;
+      const start=e=>{e.preventDefault();this.action(b.dataset.action);if(holdable[b.dataset.action]){holdTimer=setTimeout(()=>{repeat=setInterval(()=>this.action(b.dataset.action),70)},260)}};
+      const stop=()=>{clearTimeout(holdTimer);clearInterval(repeat);holdTimer=repeat=null};
+      b.addEventListener("pointerdown",start);b.addEventListener("pointerup",stop);b.addEventListener("pointerleave",stop);b.addEventListener("pointercancel",stop);
+    });
+    document.querySelector("#restart").onclick=()=>this.reset();
+  }
+  action(a){if(this.state!=="playerTurn")return;const p=this.player;if(a==="angleUp")p.angle=clamp(p.angle+2,10,80);if(a==="angleDown")p.angle=clamp(p.angle-2,10,80);if(a==="powerUp")p.power=clamp(p.power+2,20,100);if(a==="powerDown")p.power=clamp(p.power-2,20,100);if(a==="fire")this.fire(p,p.angle,p.power);this.updateControls()}
+  fire(tank,angle,power){if(this.projectile)return;tank.angle=angle;tank.power=power;this.explosionOwner=tank.side;this.projectile=new Projectile(this,tank,angle,power);this.state="projectileFlying";this.updateControls()}
+  startExplosion(x,y){this.projectile=null;this.explosion=new Explosion(x,y);this.state="explosion";this.shake=.42;const targets=[this.player,this.enemy];for(const t of targets){const nearX=clamp(x,t.x,t.x+t.w),nearY=clamp(y,t.y,t.y+t.h),dist=Math.hypot(x-nearX,y-nearY);if(dist<60)t.hp=clamp(t.hp-Math.round(30*(1-dist/60)),0,100)}this.updateControls()}
+  finishTurn(){if(this.player.hp<=0||this.enemy.hp<=0){this.state="gameOver";this.message=this.enemy.hp<=0?"승리했습니다!":"컴퓨터가 승리했습니다";document.querySelector("#restart").classList.add("show");return}const wasPlayer=this.explosionOwner==="player";this.wind=this.newWind();if(wasPlayer){this.state="computerTurn";this.aiTimer=1}else this.state="playerTurn";this.updateControls()}
+  update(dt){if(this.projectile)this.projectile.update(dt);if(this.explosion){this.explosion.update(dt);if(this.explosion.done){this.explosion=null;this.finishTurn()}}if(this.state==="computerTurn"){this.aiTimer-=dt;if(this.aiTimer<=0){const shot=this.ai.chooseShot();this.fire(this.enemy,shot.angle,shot.power)}}this.shake=Math.max(0,this.shake-dt)}
+  updateControls(){document.querySelectorAll("[data-action]").forEach(b=>b.disabled=this.state!=="playerTurn")}
+  loop(now){const dt=Math.min(.033,(now-this.last)/1000);this.last=now;try{this.update(dt);this.draw()}catch(e){console.error("게임 루프 오류",e)}requestAnimationFrame(t=>this.loop(t))}
+  draw(){const c=this.ctx;c.save();if(this.shake>0)c.translate(rand(-7,7)*this.shake/.42,rand(-5,5)*this.shake/.42);this.drawWorld(c);this.drawHud(c);c.restore()}
+  drawWorld(c){const sky=c.createLinearGradient(0,0,0,GROUND);sky.addColorStop(0,"#5fc7f2");sky.addColorStop(.62,"#b6edff");sky.addColorStop(1,"#fff2c1");c.fillStyle=sky;c.fillRect(0,0,W,H);c.fillStyle="#fff9";for(const [x,y,s] of [[120,145,55],[430,105,75],[770,165,60]]){c.beginPath();c.arc(x,y,s*.35,0,7);c.arc(x+s*.35,y-12,s*.45,0,7);c.arc(x+s*.75,y,s*.3,0,7);c.fill()}c.fillStyle="#497b48";c.beginPath();c.moveTo(0,390);c.quadraticCurveTo(160,320,320,400);c.quadraticCurveTo(520,300,700,395);c.quadraticCurveTo(830,340,960,390);c.lineTo(960,H);c.lineTo(0,H);c.fill();c.fillStyle="#263f31";c.fillRect(0,GROUND,W,H-GROUND);c.fillStyle="#638b45";c.fillRect(0,GROUND,W,8);this.player.draw(c);this.enemy.draw(c);this.drawAim(c);if(this.projectile)this.projectile.draw(c);if(this.explosion)this.explosion.draw(c,this.assets.explosion)}
+  drawAim(c){if(this.state!=="playerTurn")return;const p=this.player,m=p.muzzle,a=p.angle*Math.PI/180;c.save();c.globalAlpha=.75;c.setLineDash([5,7]);c.strokeStyle="#e8fcff";c.lineWidth=2;c.beginPath();c.moveTo(m.x,m.y);c.lineTo(m.x+Math.cos(a)*90,m.y-Math.sin(a)*90);c.stroke();c.setLineDash([]);c.drawImage(this.assets.reticle,m.x+Math.cos(a)*105-17,m.y-Math.sin(a)*105-17,34,34);c.restore()}
+  drawHud(c){c.save();c.fillStyle="#07152bdd";c.fillRect(0,0,W,76);this.health(c,24,16,270,this.player.hp,"플레이어","#3ed7ff");this.health(c,666,16,270,this.enemy.hp,"컴퓨터","#ff625c");c.textAlign="center";c.fillStyle="#fff";c.font="800 18px system-ui";const names={playerTurn:"플레이어 턴",projectileFlying:"포탄 비행 중",computerTurn:"컴퓨터 조준 중",explosion:"명중!",gameOver:"게임 종료"};c.fillText(names[this.state]||"준비",480,27);c.drawImage(this.assets.wind,430,37,27,27);c.font="700 14px system-ui";c.fillStyle="#bcefff";c.fillText(`${this.wind>0?"→":"←"} ${Math.abs(this.wind)}`,490,57);c.textAlign="left";c.fillStyle="#07152ddd";c.roundRect(18,86,235,86,12);c.fill();c.fillStyle="#fff";c.font="700 16px system-ui";c.fillText(`각도  ${Math.round(this.player.angle)}°`,34,113);c.fillText(`파워  ${Math.round(this.player.power)}`,34,140);const gx=116,gy=125,gw=120,gh=30;c.fillStyle="#0e244d";c.fillRect(gx+7,gy+8,gw-14,14);const grad=c.createLinearGradient(gx,0,gx+gw,0);grad.addColorStop(0,"#35d6ff");grad.addColorStop(.7,"#ffe65c");grad.addColorStop(1,"#ff684c");c.fillStyle=grad;c.fillRect(gx+8,gy+9,(gw-16)*(this.player.power/100),12);c.drawImage(this.assets.gauge,gx,gy,gw,30);if(this.state==="gameOver"){c.fillStyle="#061020cc";c.fillRect(0,0,W,H);c.textAlign="center";c.fillStyle="#fff3a5";c.font="900 48px system-ui";c.shadowColor="#ff9f35";c.shadowBlur=18;c.fillText(this.message,480,245);c.shadowBlur=0;c.font="600 18px system-ui";c.fillStyle="#d9efff";c.fillText("다시 시작해 새로운 전투에 도전하세요",480,282)}c.restore()}
+  health(c,x,y,w,hp,label,color){c.fillStyle="#0b203d";c.fillRect(x,y,w,22);c.fillStyle=color;c.fillRect(x+3,y+3,(w-6)*hp/100,16);c.strokeStyle="#bdefff";c.strokeRect(x,y,w,22);c.fillStyle="#fff";c.font="700 13px system-ui";c.textAlign=x<W/2?"left":"right";c.fillText(`${label}  ${hp}`,x+(x<W/2?5:w-5),y+16)}
+}
+
+// 모든 리소스 로딩이 끝난 뒤 게임을 시작한다. 파일이 없거나 실패해도 대체 그래픽으로 계속 진행한다.
+async function loadAssets(){
+  const load=(key,src)=>new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{try{resolve([key,removeConnectedBackground(img)])}catch(e){console.warn(`이미지 처리 실패, 대체 이미지 사용: ${src}`,e);resolve([key,makeFallback(key)])}};
+    img.onerror=()=>{console.warn(`이미지 로딩 실패, 대체 이미지 사용: ${src}`);resolve([key,makeFallback(key)])};
+    img.src=src;
+  });
+  const entries=await Promise.all(Object.entries(ASSET_PATHS).map(([k,s])=>load(k,s)));
+  return Object.fromEntries(entries);
+}
+loadAssets().then(assets=>{document.querySelector("#loading").classList.add("hidden");new Game(document.querySelector("#game"),assets)}).catch(e=>{console.error(e);document.querySelector("#loading").textContent="게임 초기화에 실패했습니다."});
+</script>
+</body>
+</html>
