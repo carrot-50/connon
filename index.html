@@ -8,14 +8,15 @@
   <meta name="referrer" content="no-referrer">
   <title>스카이 캐논</title>
   <style>
-    :root{color-scheme:dark;--panel:rgba(8,21,48,.9);--line:#63d8ff;--gold:#ffd869}
+    :root{color-scheme:dark;--panel:rgba(8,21,48,.9);--line:#63d8ff;--gold:#ffd869;--frame:#0a1a33}
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
     html,body{margin:0;height:100%;background:#071127;color:#fff;font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif;overscroll-behavior:none}
     body{display:flex;justify-content:center;align-items:stretch;padding:clamp(6px,1.6vw,16px);overflow:hidden;background:radial-gradient(circle at 50% 20%,#183d70,#071127 70%)}
     .app{width:min(1100px,100%);height:100%;display:flex;flex-direction:column;gap:10px}
     .title{flex:none;text-align:center;font-weight:900;letter-spacing:.12em;color:#dff8ff;text-shadow:0 0 18px #2cbcff;font-size:clamp(18px,2.6vw,30px)}
-    .stage{flex:1 1 auto;min-height:0;position:relative;border:2px solid #4386bd;border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0008,0 0 28px #2bc4ff33;background:#6ecbf2}
-    canvas{display:block;width:100%;height:100%;object-fit:contain;touch-action:none}
+    .board{flex:1 1 auto;min-height:0;container-type:size;display:grid;place-items:center}
+    .stage{aspect-ratio:16/9;width:min(100%,calc(100cqh * 16 / 9));position:relative;border:2px solid #4386bd;border-radius:18px;overflow:hidden;box-shadow:0 16px 45px #0008,0 0 28px #2bc4ff33;background:#9edfff}
+    canvas{display:block;width:100%;height:100%;touch-action:none}
     .loading{position:absolute;inset:0;display:grid;place-items:center;background:#08152a;color:#aeeeff;font-size:18px;z-index:3}
     .loading.hidden{display:none}
     .controls{flex:none;display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
@@ -32,11 +33,13 @@
 <body>
   <main class="app">
     <div class="title">SKY CANNON</div>
-    <section class="stage" aria-label="턴제 포격 게임">
-      <canvas id="game" width="960" height="540"></canvas>
-      <div id="loading" class="loading">전투 준비 중…</div>
-      <button id="restart" class="restart fire">다시 시작</button>
-    </section>
+    <div class="board">
+      <section class="stage" aria-label="턴제 포격 게임">
+        <canvas id="game" width="960" height="540"></canvas>
+        <div id="loading" class="loading">전투 준비 중…</div>
+        <button id="restart" class="restart fire">다시 시작</button>
+      </section>
+    </div>
     <nav class="controls" aria-label="게임 조작">
       <button data-action="angleUp">각도 ＋</button><button data-action="angleDown">각도 －</button>
       <button data-action="powerUp">파워 ＋</button><button data-action="powerDown">파워 －</button>
@@ -136,7 +139,7 @@ class ComputerAI{
 }
 
 class Game{
-  constructor(canvas,assets){this.canvas=canvas;this.ctx=canvas.getContext("2d");this.assets=assets;this.ai=new ComputerAI(this);this.last=performance.now();this.bind();this.reset();requestAnimationFrame(t=>this.loop(t))}
+  constructor(canvas,assets){this.canvas=canvas;this.ctx=canvas.getContext("2d");this.assets=assets;this.ai=new ComputerAI(this);this.last=performance.now();this.sx=1;this.sy=1;this.bind();this.reset();this.resize();if(window.ResizeObserver)new ResizeObserver(()=>this.resize()).observe(canvas);addEventListener("resize",()=>this.resize());requestAnimationFrame(t=>this.loop(t))}
   reset(){this.wind=this.newWind();this.player=new Tank(this,"player",75,GROUND-100,120,100,this.assets.player);this.enemy=new Tank(this,"enemy",755,GROUND-110,130,110,this.assets.enemy);this.projectile=null;this.explosion=null;this.shake=0;this.message="";this.aiTimer=0;this.explosionOwner="player";this.state="playerTurn";document.querySelector("#restart").classList.remove("show");this.updateControls()}
   newWind(){return Math.round(rand(-10,10))}
   bind(){
@@ -157,7 +160,8 @@ class Game{
   update(dt){if(this.projectile)this.projectile.update(dt);if(this.explosion){this.explosion.update(dt);if(this.explosion.done){this.explosion=null;this.finishTurn()}}if(this.state==="computerTurn"){this.aiTimer-=dt;if(this.aiTimer<=0){const shot=this.ai.chooseShot();this.fire(this.enemy,shot.angle,shot.power)}}this.shake=Math.max(0,this.shake-dt)}
   updateControls(){document.querySelectorAll("[data-action]").forEach(b=>b.disabled=this.state!=="playerTurn")}
   loop(now){const dt=Math.min(.033,(now-this.last)/1000);this.last=now;try{this.update(dt);this.draw()}catch(e){console.error("게임 루프 오류",e)}requestAnimationFrame(t=>this.loop(t))}
-  draw(){const c=this.ctx;c.save();if(this.shake>0)c.translate(rand(-7,7)*this.shake/.42,rand(-5,5)*this.shake/.42);this.drawWorld(c);this.drawHud(c);c.restore()}
+  resize(){const r=this.canvas.getBoundingClientRect();if(r.width<10||r.height<10)return;const dpr=Math.min(2,window.devicePixelRatio||1),w=Math.round(r.width*dpr),hh=Math.round(r.height*dpr);if(w===this.canvas.width&&hh===this.canvas.height)return;this.canvas.width=w;this.canvas.height=hh;this.sx=w/W;this.sy=hh/H}
+  draw(){const c=this.ctx;c.setTransform(this.sx,0,0,this.sy,0,0);c.save();if(this.shake>0)c.translate(rand(-7,7)*this.shake/.42,rand(-5,5)*this.shake/.42);this.drawWorld(c);this.drawHud(c);c.restore()}
   drawWorld(c){const sky=c.createLinearGradient(0,0,0,GROUND);sky.addColorStop(0,"#5fc7f2");sky.addColorStop(.62,"#b6edff");sky.addColorStop(1,"#fff2c1");c.fillStyle=sky;c.fillRect(0,0,W,H);c.fillStyle="#fff9";for(const [x,y,s] of [[120,145,55],[430,105,75],[770,165,60]]){c.beginPath();c.arc(x,y,s*.35,0,7);c.arc(x+s*.35,y-12,s*.45,0,7);c.arc(x+s*.75,y,s*.3,0,7);c.fill()}c.fillStyle="#497b48";c.beginPath();c.moveTo(0,390);c.quadraticCurveTo(160,320,320,400);c.quadraticCurveTo(520,300,700,395);c.quadraticCurveTo(830,340,960,390);c.lineTo(960,H);c.lineTo(0,H);c.fill();c.fillStyle="#263f31";c.fillRect(0,GROUND,W,H-GROUND);c.fillStyle="#638b45";c.fillRect(0,GROUND,W,8);this.player.draw(c);this.enemy.draw(c);this.drawAim(c);if(this.projectile)this.projectile.draw(c);if(this.explosion)this.explosion.draw(c,this.assets.explosion)}
   drawAim(c){if(this.state!=="playerTurn")return;const p=this.player,m=p.muzzle,a=p.angle*Math.PI/180;c.save();c.globalAlpha=.75;c.setLineDash([5,7]);c.strokeStyle="#e8fcff";c.lineWidth=2;c.beginPath();c.moveTo(m.x,m.y);c.lineTo(m.x+Math.cos(a)*90,m.y-Math.sin(a)*90);c.stroke();c.setLineDash([]);c.drawImage(this.assets.reticle,m.x+Math.cos(a)*105-17,m.y-Math.sin(a)*105-17,34,34);c.restore()}
   drawHud(c){c.save();c.fillStyle="#07152bdd";c.fillRect(0,0,W,76);this.health(c,24,16,270,this.player.hp,"플레이어","#3ed7ff");this.health(c,666,16,270,this.enemy.hp,"컴퓨터","#ff625c");c.textAlign="center";c.fillStyle="#fff";c.font="800 18px system-ui";const names={playerTurn:"플레이어 턴",projectileFlying:"포탄 비행 중",computerTurn:"컴퓨터 조준 중",explosion:"명중!",gameOver:"게임 종료"};c.fillText(names[this.state]||"준비",480,27);c.drawImage(this.assets.wind,430,37,27,27);c.font="700 14px system-ui";c.fillStyle="#bcefff";c.fillText(`${this.wind>0?"→":"←"} ${Math.abs(this.wind)}`,490,57);c.textAlign="left";c.fillStyle="#07152ddd";c.roundRect(18,86,235,86,12);c.fill();c.fillStyle="#fff";c.font="700 16px system-ui";c.fillText(`각도  ${Math.round(this.player.angle)}°`,34,113);c.fillText(`파워  ${Math.round(this.player.power)}`,34,140);const gx=116,gy=125,gw=120,gh=30;c.fillStyle="#0e244d";c.fillRect(gx+7,gy+8,gw-14,14);const grad=c.createLinearGradient(gx,0,gx+gw,0);grad.addColorStop(0,"#35d6ff");grad.addColorStop(.7,"#ffe65c");grad.addColorStop(1,"#ff684c");c.fillStyle=grad;c.fillRect(gx+8,gy+9,(gw-16)*(this.player.power/100),12);c.drawImage(this.assets.gauge,gx,gy,gw,30);if(this.state==="gameOver"){c.fillStyle="#061020cc";c.fillRect(0,0,W,H);c.textAlign="center";c.fillStyle="#fff3a5";c.font="900 48px system-ui";c.shadowColor="#ff9f35";c.shadowBlur=18;c.fillText(this.message,480,245);c.shadowBlur=0;c.font="600 18px system-ui";c.fillStyle="#d9efff";c.fillText("다시 시작해 새로운 전투에 도전하세요",480,282)}c.restore()}
